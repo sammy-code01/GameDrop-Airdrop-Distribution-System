@@ -305,3 +305,105 @@
                  { bonus-earned: (+ (get bonus-earned referral-info) referral-bonus) })))
       
       (ok true))))
+
+;; GameDrop - Section 4: Utility Functions and Data Access
+
+(define-public (batch-update-achievements (campaign-id uint) (players (list 50 principal)) (scores (list 50 uint)))
+  (let ((campaign-info (unwrap! (map-get? airdrop-campaigns { campaign-id: campaign-id }) err-campaign-not-found)))
+    (begin
+      (asserts! (is-eq tx-sender (get creator campaign-info)) err-owner-only)
+      (asserts! (is-eq (len players) (len scores)) err-not-eligible)
+      
+      (fold batch-update-fold 
+            (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20 u21 u22 u23 u24 
+                  u25 u26 u27 u28 u29 u30 u31 u32 u33 u34 u35 u36 u37 u38 u39 u40 u41 u42 u43 u44 u45 u46 u47 u48 u49)
+            { campaign-id: campaign-id, players: players, scores: scores, index: u0 })
+      (ok true))))
+
+(define-private (batch-update-fold 
+  (counter uint) 
+  (acc { campaign-id: uint, players: (list 50 principal), scores: (list 50 uint), index: uint }))
+  (let ((current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+        (current-index counter)
+        (campaign-id (get campaign-id acc)))
+    (if (< current-index (len (get players acc)))
+      (let ((player (unwrap-panic (element-at (get players acc) current-index)))
+            (score (unwrap-panic (element-at (get scores acc) current-index))))
+        (begin
+          (map-set player-achievements { player: player, campaign-id: campaign-id }
+            {
+              achievement-value: score,
+              is-eligible: true,
+              claim-status: false,
+              verification-date: current-time,
+              tier-level: (calculate-tier campaign-id score),
+              bonus-earned: u0
+            })
+          acc))
+      acc)))
+
+;; Helper Functions
+(define-private (calculate-tier (campaign-id uint) (score uint))
+  (if (is-some (map-get? achievement-tiers { campaign-id: campaign-id, tier: u3 }))
+    (if (>= score (get min-score (unwrap-panic (map-get? achievement-tiers { campaign-id: campaign-id, tier: u3 })))) u3
+    (if (is-some (map-get? achievement-tiers { campaign-id: campaign-id, tier: u2 }))
+      (if (>= score (get min-score (unwrap-panic (map-get? achievement-tiers { campaign-id: campaign-id, tier: u2 })))) u2
+      (if (is-some (map-get? achievement-tiers { campaign-id: campaign-id, tier: u1 }))
+        (if (>= score (get min-score (unwrap-panic (map-get? achievement-tiers { campaign-id: campaign-id, tier: u1 })))) u1 u0)
+        u0))
+      u0))
+    u0))
+
+(define-private (get-tier-multiplier (campaign-id uint) (tier-level uint))
+  (match (map-get? achievement-tiers { campaign-id: campaign-id, tier: tier-level })
+    tier-info (/ (get multiplier tier-info) u100)
+    u1))
+
+;; Read-Only Functions
+(define-read-only (get-campaign-info (campaign-id uint))
+  (map-get? airdrop-campaigns { campaign-id: campaign-id }))
+
+(define-read-only (get-player-achievement (player principal) (campaign-id uint))
+  (map-get? player-achievements { player: player, campaign-id: campaign-id }))
+
+(define-read-only (get-leaderboard-position (campaign-id uint) (player principal))
+  (map-get? leaderboard-positions { campaign-id: campaign-id, player: player }))
+
+(define-read-only (get-claim-info (campaign-id uint) (player principal))
+  (map-get? campaign-claims { campaign-id: campaign-id, player: player }))
+
+(define-read-only (get-token-balance (user principal))
+  (ft-get-balance game-token user))
+
+(define-read-only (get-achievement-tier (campaign-id uint) (tier uint))
+  (map-get? achievement-tiers { campaign-id: campaign-id, tier: tier }))
+
+(define-read-only (get-campaign-stats (campaign-id uint))
+  (map-get? campaign-stats { campaign-id: campaign-id }))
+
+(define-read-only (get-referral-info (referrer principal) (campaign-id uint))
+  (map-get? referral-bonuses { referrer: referrer, campaign-id: campaign-id }))
+
+(define-read-only (get-daily-activity (player principal) (day uint))
+  (map-get? daily-activity { player: player, day: day }))
+
+(define-read-only (get-platform-stats)
+  { total-campaigns: (var-get next-campaign-id),
+    total-fees-collected: (var-get total-platform-fees),
+    current-fee-rate: (var-get platform-fee-rate),
+    emergency-paused: (var-get emergency-pause) })
+
+(define-read-only (calculate-potential-reward (campaign-id uint) (player principal))
+  (match (map-get? player-achievements { player: player, campaign-id: campaign-id })
+    player-info 
+      (let ((campaign-info (unwrap-panic (map-get? airdrop-campaigns { campaign-id: campaign-id })))
+            (base-reward (get reward-amount campaign-info))
+            (tier-multiplier (get-tier-multiplier campaign-id (get tier-level player-info)))
+            (platform-fee (/ (* base-reward (var-get platform-fee-rate)) u10000)))
+        (some (- (* base-reward tier-multiplier) platform-fee)))
+    none))
+
+(define-read-only (get-campaign-leaderboard (campaign-id uint))
+  ;; This would typically return a list of top players, but Clarity limitations prevent complex queries
+  ;; In a real implementation, this would require off-chain indexing
+  (ok "Use off-chain indexing for leaderboard data"))
