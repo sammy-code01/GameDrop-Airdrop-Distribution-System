@@ -169,3 +169,139 @@
     (asserts! (<= new-rate u1000) err-invalid-multiplier) ;; Max 10% fee
     (var-set platform-fee-rate new-rate)
     (ok new-rate)))
+
+;; GameDrop - Section 3: Player Actions and Reward System
+
+(define-public (submit-achievement (campaign-id uint) (achievement-value uint))
+  (let 
+    ((campaign-info (unwrap! (map-get? airdrop-campaigns { campaign-id: campaign-id }) err-campaign-not-found))
+     (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+     (current-day (/ current-time u86400))
+     (tier-info (calculate-tier campaign-id achievement-value))
+     (stats (default-to { participants: u0, average-score: u0, highest-score: u0, completion-rate: u0 }
+                         (map-get? campaign-stats { campaign-id: campaign-id }))))
+    (begin
+      (asserts! (not (var-get emergency-pause)) err-campaign-ended)
+      (asserts! (get is-active campaign-info) err-campaign-ended)
+      (asserts! (>= current-time (get start-time campaign-info)) err-campaign-ended)
+      (asserts! (<= current-time (get end-time campaign-info)) err-campaign-ended)
+      (asserts! (>= achievement-value (get min-requirement campaign-info)) err-not-eligible)
+      
+      (map-set player-achievements { player: tx-sender, campaign-id: campaign-id }
+        {
+          achievement-value: achievement-value,
+          is-eligible: true,
+          claim-status: false,
+          verification-date: current-time,
+          tier-level: tier-info,
+          bonus-earned: u0
+        })
+      
+      ;; Update daily activity
+      (map-set daily-activity { player: tx-sender, day: current-day }
+        (let ((daily-info (default-to { login-count: u0, achievements-submitted: u0, tokens-earned: u0 }
+                                      (map-get? daily-activity { player: tx-sender, day: current-day }))))
+          (merge daily-info { achievements-submitted: (+ (get achievements-submitted daily-info) u1) })))
+      
+      ;; Update campaign stats
+      (map-set campaign-stats { campaign-id: campaign-id }
+        { participants: (+ (get participants stats) u1),
+          average-score: (/ (+ (* (get average-score stats) (get participants stats)) achievement-value) 
+                           (+ (get participants stats) u1)),
+          highest-score: (if (> achievement-value (get highest-score stats)) achievement-value (get highest-score stats)),
+          completion-rate: (get completion-rate stats) })
+      
+      (ok true))))
+
+(define-public (update-leaderboard-position (campaign-id uint) (player principal) (position uint) (score uint))
+  (let ((campaign-info (unwrap! (map-get? airdrop-campaigns { campaign-id: campaign-id }) err-campaign-not-found)))
+    (begin
+      (asserts! (is-eq tx-sender (get creator campaign-info)) err-owner-only)
+      
+      (map-set leaderboard-positions { campaign-id: campaign-id, player: player }
+        {
+          position: position,
+          score: score,
+          last-updated: (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))
+        })
+      
+      ;; Auto-qualify if position meets requirement
+      (if (<= position (get min-requirement campaign-info))
+        (map-set player-achievements { player: player, campaign-id: campaign-id }
+          {
+            achievement-value: score,
+            is-eligible: true,
+            claim-status: false,
+            verification-date: (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))),
+            tier-level: (calculate-tier campaign-id score),
+            bonus-earned: u0
+          })
+        true)
+      
+      (ok true))))
+
+(define-public (claim-airdrop (campaign-id uint))
+  (let 
+    ((campaign-info (unwrap! (map-get? airdrop-campaigns { campaign-id: campaign-id }) err-campaign-not-found))
+     (player-info (unwrap! (map-get? player-achievements { player: tx-sender, campaign-id: campaign-id }) err-not-eligible))
+     (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+     (current-day (/ current-time u86400))
+     (base-reward (get reward-amount campaign-info))
+     (tier-multiplier (get-tier-multiplier campaign-id (get tier-level player-info)))
+     (platform-fee (/ (* base-reward (var-get platform-fee-rate)) u10000))
+     (final-reward (- (* base-reward tier-multiplier) platform-fee)))
+    (begin
+      (asserts! (not (var-get emergency-pause)) err-campaign-ended)
+      (asserts! (get is-eligible player-info) err-not-eligible)
+      (asserts! (not (get claim-status player-info)) err-already-claimed)
+      (asserts! (< (get total-claimed campaign-info) (get max-recipients campaign-info)) err-campaign-ended)
+      (asserts! (> current-time (get end-time campaign-info)) err-campaign-ended)
+      
+      ;; Transfer tokens from campaign creator to claimant
+      (try! (ft-transfer? game-token final-reward (get creator campaign-info) tx-sender))
+      
+      ;; Collect platform fee
+      (try! (ft-transfer? game-token platform-fee (get creator campaign-info) contract-owner))
+      (var-set total-platform-fees (+ (var-get total-platform-fees) platform-fee))
+      
+      ;; Update claim status
+      (map-set player-achievements { player: tx-sender, campaign-id: campaign-id }
+        (merge player-info { claim-status: true, bonus-earned: (- final-reward base-reward) }))
+      
+      ;; Record claim
+      (map-set campaign-claims { campaign-id: campaign-id, player: tx-sender }
+        { claimed-amount: final-reward, claim-date: current-time, tier-bonus: (- final-reward base-reward) })
+      
+      ;; Update campaign stats
+      (map-set airdrop-campaigns { campaign-id: campaign-id }
+        (merge campaign-info { total-claimed: (+ (get total-claimed campaign-info) u1) }))
+      
+      ;; Update daily activity
+      (map-set daily-activity { player: tx-sender, day: current-day }
+        (let ((daily-info (default-to { login-count: u0, achievements-submitted: u0, tokens-earned: u0 }
+                                      (map-get? daily-activity { player: tx-sender, day: current-day }))))
+          (merge daily-info { tokens-earned: (+ (get tokens-earned daily-info) final-reward) })))
+      
+      (ok final-reward))))
+
+(define-public (submit-referral (campaign-id uint) (referred-player principal))
+  (let ((campaign-info (unwrap! (map-get? airdrop-campaigns { campaign-id: campaign-id }) err-campaign-not-found))
+        (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+        (referral-info (default-to { referred-count: u0, bonus-earned: u0, last-referral: u0 }
+                                   (map-get? referral-bonuses { referrer: tx-sender, campaign-id: campaign-id }))))
+    (begin
+      (asserts! (get is-active campaign-info) err-campaign-ended)
+      
+      (map-set referral-bonuses { referrer: tx-sender, campaign-id: campaign-id }
+        { referred-count: (+ (get referred-count referral-info) u1),
+          bonus-earned: (get bonus-earned referral-info),
+          last-referral: current-time })
+      
+      ;; Award referral bonus (5% of base reward)
+      (let ((referral-bonus (/ (get reward-amount campaign-info) u20)))
+        (try! (ft-mint? game-token referral-bonus tx-sender))
+        (map-set referral-bonuses { referrer: tx-sender, campaign-id: campaign-id }
+          (merge (unwrap-panic (map-get? referral-bonuses { referrer: tx-sender, campaign-id: campaign-id }))
+                 { bonus-earned: (+ (get bonus-earned referral-info) referral-bonus) })))
+      
+      (ok true))))
