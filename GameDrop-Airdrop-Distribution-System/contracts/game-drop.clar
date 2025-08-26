@@ -78,3 +78,94 @@
 (define-map daily-activity
   { player: principal, day: uint }
   { login-count: uint, achievements-submitted: uint, tokens-earned: uint })
+
+;; GameDrop - Section 2: Campaign Management Functions
+
+(define-public (create-airdrop-campaign
+  (campaign-name (string-ascii 50))
+  (game-title (string-ascii 50))
+  (total-budget uint)
+  (reward-amount uint)
+  (start-time uint)
+  (end-time uint)
+  (condition-type (string-ascii 30))
+  (min-requirement uint)
+  (max-recipients uint)
+  (bonus-percentage uint))
+  (let ((campaign-id (var-get next-campaign-id)))
+    (begin
+      (asserts! (not (var-get emergency-pause)) err-campaign-ended)
+      (asserts! (< start-time end-time) err-invalid-time-range)
+      (asserts! (>= total-budget (* reward-amount max-recipients)) err-insufficient-funds)
+      (asserts! (<= bonus-percentage u5000) err-invalid-bonus) ;; Max 50% bonus
+      (try! (ft-mint? game-token total-budget tx-sender))
+      
+      (map-set airdrop-campaigns { campaign-id: campaign-id }
+        {
+          campaign-name: campaign-name,
+          game-title: game-title,
+          creator: tx-sender,
+          total-budget: total-budget,
+          reward-amount: reward-amount,
+          start-time: start-time,
+          end-time: end-time,
+          condition-type: condition-type,
+          min-requirement: min-requirement,
+          total-claimed: u0,
+          max-recipients: max-recipients,
+          is-active: true,
+          multiplier-active: false,
+          bonus-percentage: bonus-percentage
+        })
+      
+      (map-set campaign-stats { campaign-id: campaign-id }
+        { participants: u0, average-score: u0, highest-score: u0, completion-rate: u0 })
+      
+      (var-set next-campaign-id (+ campaign-id u1))
+      (ok campaign-id))))
+
+(define-public (create-achievement-tier 
+  (campaign-id uint) 
+  (tier uint) 
+  (min-score uint) 
+  (multiplier uint) 
+  (tier-name (string-ascii 20)))
+  (let ((campaign-info (unwrap! (map-get? airdrop-campaigns { campaign-id: campaign-id }) err-campaign-not-found)))
+    (begin
+      (asserts! (is-eq tx-sender (get creator campaign-info)) err-owner-only)
+      (asserts! (and (>= multiplier u100) (<= multiplier u500)) err-invalid-multiplier) ;; 1x to 5x multiplier
+      
+      (map-set achievement-tiers { campaign-id: campaign-id, tier: tier }
+        { min-score: min-score, multiplier: multiplier, tier-name: tier-name })
+      
+      (map-set airdrop-campaigns { campaign-id: campaign-id }
+        (merge campaign-info { multiplier-active: true }))
+      
+      (ok true))))
+
+(define-public (end-campaign (campaign-id uint))
+  (let ((campaign-info (unwrap! (map-get? airdrop-campaigns { campaign-id: campaign-id }) err-campaign-not-found)))
+    (begin
+      (asserts! (is-eq tx-sender (get creator campaign-info)) err-owner-only)
+      (map-set airdrop-campaigns { campaign-id: campaign-id }
+        (merge campaign-info { is-active: false }))
+      
+      ;; Calculate final completion rate
+      (let ((stats (unwrap-panic (map-get? campaign-stats { campaign-id: campaign-id }))))
+        (map-set campaign-stats { campaign-id: campaign-id }
+          (merge stats { completion-rate: (/ (* (get total-claimed campaign-info) u100) (get participants stats)) })))
+      
+      (ok true))))
+
+(define-public (emergency-pause-toggle)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set emergency-pause (not (var-get emergency-pause)))
+    (ok (var-get emergency-pause))))
+
+(define-public (update-platform-fee (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= new-rate u1000) err-invalid-multiplier) ;; Max 10% fee
+    (var-set platform-fee-rate new-rate)
+    (ok new-rate)))
